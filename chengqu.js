@@ -4,7 +4,7 @@
 
 
 # XPlan 皮肤全解锁 + 强制启动 (包含列表、详情和应用接口)
-^https?:\/\/appserver\.nokeeu\.com\/api\/user\/a\/v1\/skin\/(suggestSkinList|useSkin|getCurrentSkinDetail) url script-response-body https://raw.githubusercontent.com/hoseynwnw/xscript/main/skin_unlock.js
+^https?:\/\/appserver\.nokeeu\.com\/api\/user\/a\/v1\/skin\/(suggestSkinList|useSkin|getCurrentSkinDetail) url script-response-body https://raw.githubusercontent.com/hoseynwnw/xscript/main/chengqu.js
 
 [mitm]
 hostname = appserver.nokeeu.com
