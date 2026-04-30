@@ -1,21 +1,17 @@
-const script = `
-  (function() {
-    const el = document.getElementById('box_pub');
-    if (el) {
-      el.remove(); 
-      console.log('box_pub has been deleted');
-    }
-  })();
-`;
+/**
+ * @name Delete Box Pub
+ * @description 彻底从源码删除 #box_pub 元素
+ */
 
-// 将这段 JS 注入到 </body> 标签之前
-const jsTag = `<script>${script}</script>`;
-const bodyRegex = /<\/body>/i;
+// 匹配 <div id="box_pub"> 到最近的 </div> 结束标签
+// [^]*? 是为了匹配包含换行符在内的所有字符（非贪婪）
+const regex = /<div id="box_pub">[^]*?<\/div>/i;
 
 if ($response.body) {
     let body = $response.body;
-    if (bodyRegex.test(body)) {
-        body = body.replace(bodyRegex, jsTag + '</body>');
+    if (regex.test(body)) {
+        // 将匹配到的整个 div 块替换为空字符串
+        body = body.replace(regex, "");
         $done({ body });
     } else {
         $done({ body });
