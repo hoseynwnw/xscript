@@ -78,6 +78,20 @@ if (url.includes("/log/newInitialization")) {
     return;
 }
 
+// ===== 班级小管家 alog 特殊拦截 =====
+if ($request && $request.url.includes("log.banjixiaoguanjia.com/alog")) {
+    // 请求体强制改为 {}
+    $done({ body: "{}" });
+} else if ($response && $request.url.includes("log.banjixiaoguanjia.com/alog")) {
+    // 响应体也强制改为 {}
+    $done({ body: "{}" });
+}
+
+
+
+
+
+
 // 默认兜底
 log(`[DEFAULT] 未匹配路径 → ${url}`);
 hit("Default", '{"code":0}');
