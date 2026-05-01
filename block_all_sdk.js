@@ -72,6 +72,12 @@ if (url.includes("/alog")) {
     return;
 }
 
+// AdFunLink 
+if (url.includes("/log/newInitialization")) {
+    hit("AdFunLink newInitialization", '{"code":0}');
+    return;
+}
+
 // 默认兜底
 log(`[DEFAULT] 未匹配路径 → ${url}`);
 hit("Default", '{"code":0}');
