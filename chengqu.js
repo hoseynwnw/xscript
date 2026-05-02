@@ -16,7 +16,7 @@ hostname = appserver.nokeeu.com
 // ==============================================================================
 
 // 可选皮肤列表: "Bluebeach", "BlueHour", "brilliant", "peach", "1Bit", "glacier", "starfield", "blackgold"
-const SELECTED_SKIN_NO = "brilliant"; 
+const SELECTED_SKIN_NO = "blackgold"; 
 
 // 公共字段：所有皮肤共用的属性
 const DEFAULT_FIELDS = {
