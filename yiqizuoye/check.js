@@ -12,6 +12,8 @@
  * - 每一个名字会对应本地存储中的一个 Key，如: yiqizuoye_cookie_yihan。
  * - 如果某个学生的 Cookie 失效，脚本会单独针对该学生发出重登提醒。
  * * [配置参考]
+ *  * * [配置参考]
+ *  * * [配置参考]
  * [task_local]
  * 30 18 * * * https://raw.githubusercontent.com/hoseynwnw/xscript/refs/heads/main/yiqizuoye/check.jsyiqizuoye_task.js, tag=17作业汇总, enabled=true
  * ==========================================
