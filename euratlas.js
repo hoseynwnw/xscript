@@ -1,6 +1,6 @@
 /**
  * Quantumult X 脚本：删除 Euratlas 广告区块
- * 匹配目标：所有 id="box_pub" 的 div 元素
+ * 匹配目标：所有 id="box_pub" 的 div  素
  */
 
 let body = $response.body;
