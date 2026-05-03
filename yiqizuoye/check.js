@@ -1,6 +1,20 @@
 /**
- * Quantumult X 脚本：汇总查询学生作业历史 (支持持久化存储)
- * 配置：定时任务 (Task) 类型
+ * ==========================================
+ * 脚本名称：17作业汇总查询 (Task 版)
+ * 脚本作者：Gemini
+ * 更新时间：2024-05-03
+ * * [脚本说明]
+ * 1. 本脚本用于定时汇总查询多个学生的作业历史。
+ * 2. 必须配合重写脚本 (yiqizuoye_get_cookie.js) 使用以自动获取身份令牌。
+ * 3. 运行原理：从 $prefs 中根据姓名读取对应的 Cookie，模拟 App 发送 HTTPS 请求。
+ * * [多学生调用逻辑]
+ * - 脚本会自动循环 CONFIG.studentNames 数组中的名字。
+ * - 每一个名字会对应本地存储中的一个 Key，如: yiqizuoye_cookie_yihan。
+ * - 如果某个学生的 Cookie 失效，脚本会单独针对该学生发出重登提醒。
+ * * [配置参考]
+ * [task_local]
+ * 30 18 * * * yiqizuoye_task.js, tag=17作业汇总, enabled=true
+ * ==========================================
  */
 
 const CONFIG = {
@@ -30,7 +44,7 @@ function formatStartDate(dateStr) {
  * 核心函数：根据学生姓名获取对应的 Cookie 并查询作业
  */
 async function fetchHomework(name) {
-    // 根据传入的名字（yihan/yibo）动态拼接存储 Key
+    // 根据传入的名字动态拼接存储 Key
     const saveKey = `yiqizuoye_cookie_${name}`;
     const cookie = $prefs.valueForKey(saveKey);
 
