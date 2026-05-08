@@ -1,0 +1,283 @@
+{
+    "id": "DualSubs.AI.sub",
+    "name": "🤖 DualSubs AI Translation",
+    "author": "@Minis",
+    "description": "DualSubs 大模型翻译扩展 — 支持豆包/DeepSeek/OpenAI 等 OpenAI 兼容 API",
+    "icon": "https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/1f916.png",
+    "repo": "https://github.com",
+    "apps": [
+        {
+            "id": "DualSubs.AI.Translate",
+            "name": "🤖 AI 翻译引擎",
+            "descs_html": [
+                "为 DualSubs 添加大模型翻译能力，替代传统机器翻译。",
+                "支持所有 OpenAI 兼容 API（豆包、DeepSeek、Kimi、通义千问等）。",
+                "<br>",
+                "<b>⚠️ 使用前提：</b>",
+                "1. 需要已安装 DualSubs 并正常工作",
+                "2. 需要修改 DualSubs 的 Translate.mjs 添加 OpenAI() 方法",
+                "3. 修改后重新构建或手动替换 Translate.response.bundle.js",
+                "<br>",
+                "<b>配置完成后：</b>",
+                "在「翻译器」页面将「服务商API」设为 <code>OpenAI</code> 即可生效。"
+            ],
+            "keys": [
+                "@DualSubs.API.OpenAI",
+                "@DualSubs.API.OpenAI.Base",
+                "@DualSubs.API.OpenAI.Key",
+                "@DualSubs.API.OpenAI.Model",
+                "@DualSubs.API.OpenAI.Prompt",
+                "@DualSubs.API.OpenAI.Temperature",
+                "@DualSubs.API.OpenAI.MaxTokens"
+            ],
+            "settings": [
+                {
+                    "id": "@DualSubs.API.OpenAI.Base",
+                    "name": "API 地址",
+                    "type": "selects",
+                    "val": "https://ark.cn-beijing.volces.com/api/v3",
+                    "items": [
+                        {
+                            "key": "https://ark.cn-beijing.volces.com/api/v3",
+                            "label": "🔥 豆包 (Doubao)"
+                        },
+                        {
+                            "key": "https://api.deepseek.com/v1",
+                            "label": "🐋 DeepSeek"
+                        },
+                        {
+                            "key": "https://api.moonshot.cn/v1",
+                            "label": "🌙 Kimi (月之暗面)"
+                        },
+                        {
+                            "key": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                            "label": "☁️ 通义千问 (Qwen)"
+                        },
+                        {
+                            "key": "https://api.openai.com/v1",
+                            "label": "🤖 OpenAI (GPT)"
+                        },
+                        {
+                            "key": "https://api.groq.com/openai/v1",
+                            "label": "⚡ Groq (Llama)"
+                        },
+                        {
+                            "key": "https://api.siliconflow.cn/v1",
+                            "label": "🪐 硅基流动 (SiliconFlow)"
+                        },
+                        {
+                            "key": "custom",
+                            "label": "✏️ 自定义（填写下方）"
+                        }
+                    ],
+                    "desc": "选择你的 AI 服务商，或选择自定义填写完整地址。地址格式：https://xxx.com/v1（不需要带 /chat/completions）"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.Base.Custom",
+                    "name": "自定义 API 地址",
+                    "type": "text",
+                    "val": "",
+                    "placeholder": "https://your-api.com/v1",
+                    "desc": "当上方选择「自定义」时填写此项。格式：https://xxx.com/v1"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.Key",
+                    "name": "API Key",
+                    "type": "text",
+                    "val": "",
+                    "placeholder": "sk-xxxxxxxxxxxxxxxx",
+                    "desc": "你的 AI 服务 API Key。豆包：在火山引擎控制台创建推理接入点获取。DeepSeek：在 platform.deepseek.com 获取。"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.Model",
+                    "name": "模型名称",
+                    "type": "selects",
+                    "val": "doubao-pro-32k",
+                    "items": [
+                        {
+                            "key": "doubao-pro-32k",
+                            "label": "🔥 豆包 Pro 32K（推荐）"
+                        },
+                        {
+                            "key": "doubao-lite-32k",
+                            "label": "🪶 豆包 Lite 32K（快速）"
+                        },
+                        {
+                            "key": "deepseek-chat",
+                            "label": "🐋 DeepSeek V3"
+                        },
+                        {
+                            "key": "deepseek-reasoner",
+                            "label": "🐋 DeepSeek R1（推理）"
+                        },
+                        {
+                            "key": "moonshot-v1-8k",
+                            "label": "🌙 Kimi 8K"
+                        },
+                        {
+                            "key": "qwen-plus",
+                            "label": "☁️ 通义千问 Plus"
+                        },
+                        {
+                            "key": "qwen-turbo",
+                            "label": "☁️ 通义千问 Turbo（快速）"
+                        },
+                        {
+                            "key": "gpt-4o-mini",
+                            "label": "🤖 GPT-4o Mini"
+                        },
+                        {
+                            "key": "gpt-4o",
+                            "label": "🤖 GPT-4o"
+                        },
+                        {
+                            "key": "custom",
+                            "label": "✏️ 自定义"
+                        }
+                    ],
+                    "desc": "选择模型。字幕翻译推荐用轻量模型，速度快延迟低。"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.Model.Custom",
+                    "name": "自定义模型名",
+                    "type": "text",
+                    "val": "",
+                    "placeholder": "your-model-name",
+                    "desc": "当上方选择「自定义」时填写。填写你的模型端点 ID 或模型名。"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.Prompt",
+                    "name": "翻译 Prompt",
+                    "type": "textarea",
+                    "val": "你是专业的字幕翻译器。规则：\n1. 将用户输入的每行文本翻译成目标语言\n2. 每行对应一行翻译，保持行数一致\n3. 只输出翻译结果，每行用换行分隔\n4. 不加序号、不加解释、不加多余内容\n5. 专有名词可保留原文\n6. 保持原文语气和风格，翻译自然流畅",
+                    "placeholder": "自定义翻译指令...",
+                    "desc": "发送给 AI 的系统提示词。不懂就别改。可在末尾追加特殊要求（如：保留品牌名原文、使用口语化翻译等）。"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.Temperature",
+                    "name": "Temperature（创造性）",
+                    "type": "number",
+                    "val": "0.2",
+                    "placeholder": "0.2",
+                    "desc": "0~1 之间。越低越稳定准确（推荐 0.1~0.3），越高越有创造性。字幕翻译建议用低值。"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.MaxTokens",
+                    "name": "最大输出 Tokens",
+                    "type": "number",
+                    "val": "4096",
+                    "placeholder": "4096",
+                    "desc": "单次请求最大输出 token 数。字幕翻译一般 2048~4096 足够。"
+                }
+            ],
+            "author": "@Minis"
+        },
+        {
+            "id": "DualSubs.AI.Config",
+            "name": "🤖 AI 翻译高级设置",
+            "descs_html": [
+                "AI 翻译的高级配置项，一般不需要修改。",
+                "如果翻译质量不满意，可以在这里微调。"
+            ],
+            "keys": [
+                "@DualSubs.API.OpenAI.BatchSize",
+                "@DualSubs.API.OpenAI.RetryTimes",
+                "@DualSubs.API.OpenAI.Timeout",
+                "@DualSubs.API.OpenAI.Fallback"
+            ],
+            "settings": [
+                {
+                    "id": "@DualSubs.API.OpenAI.BatchSize",
+                    "name": "每批翻译行数",
+                    "type": "number",
+                    "val": "30",
+                    "placeholder": "30",
+                    "desc": "每次发送给 AI 的字幕行数。行数越少上下文越清晰但请求次数越多。推荐 20~50。"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.RetryTimes",
+                    "name": "重试次数",
+                    "type": "number",
+                    "val": "3",
+                    "placeholder": "3",
+                    "desc": "AI 请求失败时的重试次数。"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.Timeout",
+                    "name": "请求超时时间",
+                    "type": "number",
+                    "val": "15000",
+                    "placeholder": "15000",
+                    "desc": "单位毫秒。大模型响应较慢，建议 10000~20000。"
+                },
+                {
+                    "id": "@DualSubs.API.OpenAI.Fallback",
+                    "name": "失败时降级到",
+                    "type": "selects",
+                    "val": "Google",
+                    "items": [
+                        {
+                            "key": "Google",
+                            "label": "Google Translate（免费）"
+                        },
+                        {
+                            "key": "none",
+                            "label": "不降级（直接失败）"
+                        }
+                    ],
+                    "desc": "AI 翻译失败时的降级方案。选 Google 则自动回落到免费 Google 翻译。"
+                }
+            ],
+            "author": "@Minis"
+        },
+        {
+            "id": "DualSubs.AI.Translate.Vendor",
+            "name": "🤖 切换翻译引擎",
+            "descs_html": [
+                "快速切换翻译引擎。选择 OpenAI 后需确保已在上方配置好 API Key。",
+                "<br>",
+                "<b>各引擎对比：</b>",
+                "<table>",
+                "<tr><td>Google</td><td>免费，速度快，质量一般</td></tr>",
+                "<tr><td>DeepL</td><td>翻译质量好，需 API Key</td></tr>",
+                "<tr><td>OpenAI/AI</td><td>质量最好，理解上下文，需 API Key</td></tr>",
+                "</table>"
+            ],
+            "keys": [
+                "@DualSubs.Translate.Settings.Vendor"
+            ],
+            "settings": [
+                {
+                    "id": "@DualSubs.Translate.Settings.Vendor",
+                    "name": "翻译服务商",
+                    "type": "selects",
+                    "val": "Google",
+                    "items": [
+                        {
+                            "key": "Google",
+                            "label": "🌐 Google Translate（免费）"
+                        },
+                        {
+                            "key": "OpenAI",
+                            "label": "🤖 AI 大模型（推荐）"
+                        },
+                        {
+                            "key": "DeepL",
+                            "label": "📘 DeepL"
+                        },
+                        {
+                            "key": "GoogleCloud",
+                            "label": "☁️ Google Cloud"
+                        },
+                        {
+                            "key": "Microsoft",
+                            "label": "🔷 Microsoft"
+                        }
+                    ],
+                    "desc": "选择翻译引擎。选 OpenAI 需先在「AI 翻译引擎」中配置 API Key。"
+                }
+            ],
+            "author": "@Minis"
+        }
+    ]
+}
