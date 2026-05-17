@@ -1,6 +1,6 @@
 /**
- * Cloudflare Worker: YouTube iOS 双语字幕 (V25 终极生产版)
- * 包含：单行原生大字号 + 100% 防乱序同步 + 智能防毒化缓存熔断机制
+ * Cloudflare Worker: YouTube iOS 双语字幕 (V26 跨章节无死角版)
+ * 核心升级：废除大数组锁定逻辑。采用全树递归提取，完美支持多章节长视频，彻底解决翻译中断问题！
  */
 
 function varintSize(v) { v = v >>> 0; let s = 0; do { s++; v >>>= 7; } while (v > 0); return s; }
@@ -9,11 +9,7 @@ function writeVarint(buf, offset, value) { let v = value >>> 0; while (v > 0x7f)
 class PbReader {
   constructor(bytes) { this.buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes); this.pos = 0; this.len = this.buf.length; }
   eof() { return this.pos >= this.len; }
-  uint32() {
-    let r = 0, s = 0;
-    while (this.pos < this.len) { const b = this.buf[this.pos++]; r |= (b & 0x7f) << s; if ((b & 0x80) === 0) return r >>> 0; s += 7; if (s >= 35) { this.pos++; return r >>> 0; } }
-    return 0;
-  }
+  uint32() { let r = 0, s = 0; while (this.pos < this.len) { const b = this.buf[this.pos++]; r |= (b & 0x7f) << s; if ((b & 0x80) === 0) return r >>> 0; s += 7; if (s >= 35) { this.pos++; return r >>> 0; } } return 0; }
   bytes() { const len = this.uint32(); if (this.pos + len > this.len) throw new Error('overrun'); const s = this.buf.slice(this.pos, this.pos + len); this.pos += len; return s; }
 }
 
@@ -80,7 +76,7 @@ function tryStr(val) {
 }
 
 // ================================================================
-// 单行排版 + 长度精准修正逻辑
+// 全树无死角采集与注入逻辑
 // ================================================================
 
 function extractTimeAndText(obj) {
@@ -90,20 +86,11 @@ function extractTimeAndText(obj) {
     const t1 = tryStr(f1), t5 = tryStr(f5);
     if (t1 && t5 && /\d:\d/.test(t5)) return { time: t5, text: t1 };
   }
-  for (const val of Object.values(obj)) {
-    for (const item of (Array.isArray(val) ? val : [val])) {
-      if (item && item.t === 'msg') {
-        const res = extractTimeAndText(item.v);
-        if (res) return res;
-      }
-    }
-  }
-  return null;
+  return null; // 不再递归深入，仅判断当前节点
 }
 
 function hackTextAndLength(obj, newText, oldText) {
-  if (!obj || typeof obj !== 'object') return false;
-  let changed = false;
+  if (!obj || typeof obj !== 'object') return;
   const f1 = obj['1'], f5 = obj['5'];
   
   if (!Array.isArray(f1) && !Array.isArray(f5)) {
@@ -112,98 +99,94 @@ function hackTextAndLength(obj, newText, oldText) {
       if (newText !== null) {
         obj['1'] = { t: 'string', v: newText };
         
-        // 精准补充长度到 Field 7，保证 iOS 不缩小字号
         const f7 = obj['7'];
         if (f7 && !Array.isArray(f7) && f7.t === 'varint' && f7.v > 0) {
           const oldBytes = ENC.encode(oldText || t1);
           const newBytes = ENC.encode(newText);
           const diff = newBytes.length - oldBytes.length;
-          if (diff > 0) {
-            obj['7'] = { t: 'varint', v: f7.v + diff };
-          }
+          if (diff > 0) obj['7'] = { t: 'varint', v: f7.v + diff };
         }
       }
       obj.__dirty = true;
-      return true; 
     }
   }
+}
+
+// 第一遍全树递归：搜刮每一个角落的字幕
+function collectSegmentsGlobally(obj, segments = []) {
+  if (!obj || typeof obj !== 'object') return segments;
+  
+  // 检查当前节点是不是字幕节点
+  const extracted = extractTimeAndText(obj);
+  if (extracted) {
+    segments.push({ origText: extracted.text, origTime: extracted.time });
+  }
+
+  // 无论是不是，都继续往下找
   for (const val of Object.values(obj)) {
     for (const item of (Array.isArray(val) ? val : [val])) {
       if (item && item.t === 'msg') {
-        if (hackTextAndLength(item.v, newText, oldText)) { item.dirty = true; obj.__dirty = true; changed = true; }
+        collectSegmentsGlobally(item.v, segments);
+      }
+    }
+  }
+  return segments;
+}
+
+// 第二遍全树递归：按照翻译数组的顺序依次填坑
+function injectTranslationsGlobally(obj, translations, state = { idx: 0 }) {
+  if (!obj || typeof obj !== 'object') return false;
+  let changed = false;
+
+  const extracted = extractTimeAndText(obj);
+  if (extracted) {
+    // 找到了坑，填进去！
+    let zh = translations[state.idx];
+    if (!zh || zh === extracted.text) zh = `【受限】${extracted.text.slice(0, 10)}...`;
+    
+    // 【采用你最完美的排版：回车 + 全角缩进】
+    const combinedText = `${extracted.text}\n\u3000${zh}`;
+    
+    hackTextAndLength(obj, combinedText, extracted.text);
+    obj.__dirty = true;
+    state.idx++;
+    return true; // 这个节点改过了，不用往它的子节点找字幕了
+  }
+
+  // 如果当前节点不是坑，去子节点找
+  for (const val of Object.values(obj)) {
+    for (const item of (Array.isArray(val) ? val : [val])) {
+      if (item && item.t === 'msg') {
+        if (injectTranslationsGlobally(item.v, translations, state)) {
+          item.dirty = true; obj.__dirty = true; changed = true;
+        }
       }
     }
   }
   return changed;
 }
 
-function isRealSubtitleArray(arr) {
-  if (!Array.isArray(arr) || arr.length < 5) return false;
-  let timeTagCount = 0;
-  for (const item of arr) {
-    if (item && item.t === 'msg' && extractTimeAndText(item.v)) timeTagCount++;
-    if (timeTagCount >= 3) return true;
-  }
-  return false;
-}
-
-// 收集、翻译并注入。返回 { changed: boolean, rate: number }
 async function processAndInjectSubtitles(obj, targetLang = 'zh-CN') {
   if (!obj || typeof obj !== 'object') return { changed: false, rate: 0 };
 
-  for (const [key, val] of Object.entries(obj)) {
-    if (isRealSubtitleArray(val)) {
-      console.log(`[DEBUG] 🎯 定位到真实字幕数组，长度: ${val.length}`);
-      
-      const segments = [];
-      for (const item of val) {
-        if (item && item.t === 'msg') {
-          const extracted = extractTimeAndText(item.v);
-          if (extracted) segments.push({ origText: extracted.text, origTime: extracted.time });
-        }
-      }
-
-      // 获取翻译结果与成功率
-      const { translations, successCount } = await translateAll(segments, targetLang);
-      const rate = segments.length > 0 ? successCount / segments.length : 1;
-      
-      let translateIndex = 0;
-
-      for (let i = 0; i < val.length; i++) {
-        const item = val[i];
-        if (!item || item.t !== 'msg') continue;
-        
-        const extracted = extractTimeAndText(item.v);
-        if (!extracted) continue;
-
-        let zh = translations[translateIndex];
-        // 如果翻译被限流或出错，打上受限标记
-        if (!zh || zh === extracted.text) zh = `【受限】${extracted.text.slice(0, 10)}...`;
-        
-        // 单节点换行拼接
-        const combinedText = `${extracted.text}\n【中】 ${zh}`;
-        
-        // 修改文本并自动扩充 Field 7 长度，保持原生大字号！
-        hackTextAndLength(item.v, combinedText, extracted.text);
-        item.dirty = true;
-        obj.__dirty = true;
-
-        translateIndex++;
-      }
-      return { changed: true, rate: rate };
-    }
-
-    // 递归寻找数组
-    for (const item of (Array.isArray(val) ? val : [val])) {
-      if (item && item.t === 'msg') {
-        const res = await processAndInjectSubtitles(item.v, targetLang);
-        if (res.changed) { 
-          item.dirty = true; obj.__dirty = true; return res; 
-        }
-      }
-    }
+  console.log(`[DEBUG] 🎯 开始全树无死角搜刮字幕...`);
+  const segments = collectSegmentsGlobally(obj);
+  
+  if (segments.length === 0) {
+    console.log(`[DEBUG] ❌ 未找到任何字幕。`);
+    return { changed: false, rate: 0 };
   }
-  return { changed: false, rate: 0 };
+
+  console.log(`[DEBUG] 🎯 共搜刮到 ${segments.length} 句字幕，准备翻译...`);
+  const { translations, successCount } = await translateAll(segments, targetLang);
+  const rate = successCount / segments.length;
+
+  console.log(`[DEBUG] 🎯 开始全树无死角注入翻译...`);
+  const state = { idx: 0 };
+  const changed = injectTranslationsGlobally(obj, translations, state);
+
+  console.log(`[DEBUG] ✅ 注入完成！共填入 ${state.idx} 句。`);
+  return { changed: changed, rate: rate };
 }
 
 // ================================================================
@@ -298,7 +281,6 @@ async function translateAll(segments, targetLang = 'zh-CN') {
   });
   
   const all = results.flat();
-  // 计算翻译成功数量
   const ok = all.filter((t, i) => t && t !== (segments[i]?.origText || '').replace(/\n/g, ' ').trim()).length;
   return { translations: all, successCount: ok };
 }
@@ -317,10 +299,10 @@ async function cacheResponse(cacheKey, body, status, origHeaders, isGzip) {
   if (isGzip) h.set('Content-Encoding', 'gzip');
   h.set('Content-Type', 'application/x-protobuf');
   h.set('Content-Length', String(body.length));
-  h.set('Cache-Control', 'public, max-age=86400'); // 缓存 24 小时
+  h.set('Cache-Control', 'public, max-age=86400');
   const resp = new Response(body, { status, headers: h });
   if (status >= 200 && status < 400) {
-    try { await caches.default.put(cacheKey, resp.clone()); console.log(`✅ 双语字幕成功写入缓存`); } catch (e) { console.warn('缓存写入失败:', e.message); }
+    try { await caches.default.put(cacheKey, resp.clone()); } catch (e) {}
   }
   return resp;
 }
@@ -373,7 +355,7 @@ export default {
     if (request.method === 'GET') {
       const purgeKey = new URL(request.url).searchParams.get('purge');
       if (purgeKey) { await caches.default.delete(purgeKey); return new Response('purged: ' + purgeKey); }
-      return new Response('Worker is Running V25 (Smart Cache & Large Font Sync)');
+      return new Response('Worker is Running V26 (Cross-Chapter Global Scan)');
     }
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
@@ -383,10 +365,8 @@ export default {
       
       const tokenStr = extractReqToken(reqBody);
       const reqId = tokenStr || fnv1aHash(reqBody);
-      // 更新缓存前缀，彻底隔离旧版本的错误缓存
-      const cacheKey = `https://yt-sub-cache/v25/largefont/${reqId}/${lang}`;
+      const cacheKey = `https://yt-sub-cache/v26/global/${reqId}/${lang}`;
       
-      // 1. 尝试读取缓存
       const earlyHit = await getCachedResponse(cacheKey);
       if (earlyHit) return earlyHit;
 
@@ -397,7 +377,6 @@ export default {
       for (const [k, v] of request.headers) { if (!skip.has(k.toLowerCase())) fwd.set(k, v); }
       fwd.set('Accept-Encoding', 'gzip, identity');
 
-      // 2. 向 YouTube 请求原始字幕
       const ytResp = await fetchTimeout(
         'https://youtubei.googleapis.com/youtubei/v1/get_panel',
         { method: 'POST', headers: fwd, body: reqBody },
@@ -412,23 +391,16 @@ export default {
       try { parsed = pbDecode(bytes); }
       catch (e) { return makeResponse(isGzip ? await gzip(bytes) : bytes, ytResp.status, ytResp.headers, isGzip); }
 
-      // 3. 执行翻译与大字号排版注入
       const injectResult = await processAndInjectSubtitles(parsed, lang);
 
       const rebuilt = pbEncode(parsed);
       const final = isGzip ? await gzip(rebuilt) : rebuilt;
 
-      // 4. 智能缓存决策器 (熔断保护)
       if (injectResult.changed && injectResult.rate >= 0.7) {
-        console.log(`[DEBUG] ✅ 翻译成功率 ${(injectResult.rate * 100).toFixed(1)}%，允许写入缓存`);
+        console.log(`[DEBUG] ✅ 允许写入缓存`);
         await cacheResponse(cacheKey, final, ytResp.status, ytResp.headers, isGzip);
-      } else if (injectResult.changed) {
-        console.log(`[DEBUG] ⚠️ 翻译成功率仅 ${(injectResult.rate * 100).toFixed(1)}%，触发缓存防毒熔断，跳过缓存！`);
-      } else {
-        console.log(`[DEBUG] ⚠️ 未检测到有效字幕数组，不执行缓存。`);
       }
 
-      // 返回结果给手机端
       return makeResponse(final, ytResp.status, ytResp.headers, isGzip);
 
     } catch (e) {
