@@ -2,7 +2,7 @@
  * Cloudflare Worker: YouTube iOS 双语字幕注入 (V17 终极版)
  *
  * 核心优化：
- * 1. [UI特效] 故意保留短的 field7 长度，利用 iOS 原生 UILabel 的 adjustsFontSizeToFitWidth 特性，实现中文字幕在下方以小字号排版的完美视觉效果。
+ * 1. [UI特效] 实现中文字幕在下方以大字号排版的完美视觉效果。
  * 2. [稳定性] (继承V16) LEN 字段一律先尝试嵌套解析，不瞎猜字符串，绝对不损坏原始 protobuf 的任何二进制字段。
  * 3. [缓存精准化] 深入解析 POST Request Body，精准定位 `PAmodern_transcript_view` 后的 Token 字符串（例如 24字节的 Base64），以此作为完美缓存 Key。
  */
