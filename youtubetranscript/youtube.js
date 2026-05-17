@@ -1,6 +1,6 @@
 /**
- * Cloudflare Worker: YouTube iOS 双语字幕 (V26 跨章节无死角版)
- * 核心升级：废除大数组锁定逻辑。采用全树递归提取，完美支持多章节长视频，彻底解决翻译中断问题！
+ * Cloudflare Worker: YouTube iOS 双语字幕 (V27 究极稳定生产版)
+ * 核心升级：多节点轮询防封杀、单线程平滑请求、修复换行符对比 Bug，保留全角空格对齐排版。
  */
 
 function varintSize(v) { v = v >>> 0; let s = 0; do { s++; v >>>= 7; } while (v > 0); return s; }
@@ -86,7 +86,7 @@ function extractTimeAndText(obj) {
     const t1 = tryStr(f1), t5 = tryStr(f5);
     if (t1 && t5 && /\d:\d/.test(t5)) return { time: t5, text: t1 };
   }
-  return null; // 不再递归深入，仅判断当前节点
+  return null;
 }
 
 function hackTextAndLength(obj, newText, oldText) {
@@ -112,48 +112,43 @@ function hackTextAndLength(obj, newText, oldText) {
   }
 }
 
-// 第一遍全树递归：搜刮每一个角落的字幕
 function collectSegmentsGlobally(obj, segments = []) {
   if (!obj || typeof obj !== 'object') return segments;
-  
-  // 检查当前节点是不是字幕节点
   const extracted = extractTimeAndText(obj);
   if (extracted) {
     segments.push({ origText: extracted.text, origTime: extracted.time });
   }
-
-  // 无论是不是，都继续往下找
   for (const val of Object.values(obj)) {
     for (const item of (Array.isArray(val) ? val : [val])) {
-      if (item && item.t === 'msg') {
-        collectSegmentsGlobally(item.v, segments);
-      }
+      if (item && item.t === 'msg') collectSegmentsGlobally(item.v, segments);
     }
   }
   return segments;
 }
 
-// 第二遍全树递归：按照翻译数组的顺序依次填坑
 function injectTranslationsGlobally(obj, translations, state = { idx: 0 }) {
   if (!obj || typeof obj !== 'object') return false;
   let changed = false;
 
   const extracted = extractTimeAndText(obj);
   if (extracted) {
-    // 找到了坑，填进去！
+    // 修复换行符对比 Bug，用清洗后的原文来做比对
+    const cleanOrig = extracted.text.replace(/\n/g, ' ').trim();
     let zh = translations[state.idx];
-    if (!zh || zh === extracted.text) zh = `【受限】${extracted.text.slice(0, 10)}...`;
     
-    // 【采用你最完美的排版：回车 + 全角缩进】
+    if (!zh || zh === cleanOrig) {
+        zh = `【网络限流】${cleanOrig.slice(0, 10)}...`;
+    }
+    
+    // 【排版黑魔法】换行 + 全角空格对齐缩进
     const combinedText = `${extracted.text}\n\u3000${zh}`;
     
     hackTextAndLength(obj, combinedText, extracted.text);
     obj.__dirty = true;
     state.idx++;
-    return true; // 这个节点改过了，不用往它的子节点找字幕了
+    return true; 
   }
 
-  // 如果当前节点不是坑，去子节点找
   for (const val of Object.values(obj)) {
     for (const item of (Array.isArray(val) ? val : [val])) {
       if (item && item.t === 'msg') {
@@ -190,7 +185,7 @@ async function processAndInjectSubtitles(obj, targetLang = 'zh-CN') {
 }
 
 // ================================================================
-// 网络请求与防封翻译核心
+// 网络请求与高可用防封翻译核心
 // ================================================================
 
 function fnv1aHash(buffer) {
@@ -228,60 +223,74 @@ async function asyncPool(concurrency, tasks, taskFn) {
   return results;
 }
 
-async function fetchTimeout(url, opts = {}, ms = 8000, retries = 1) {
-  let lastError;
-  for (let i = 0; i <= retries; i++) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), ms);
-    try {
-      const r = await fetch(url, { ...opts, signal: ctrl.signal });
-      clearTimeout(t);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r;
-    } catch (e) {
-      clearTimeout(t); lastError = e;
-      if (i < retries) await new Promise(r => setTimeout(r, 300));
-    }
+async function fetchTimeout(url, opts = {}, ms = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { ...opts, signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r;
+  } catch (e) {
+    clearTimeout(t);
+    throw e;
   }
-  throw lastError;
 }
 
+// 终极防封翻译：多节点轮询
 async function translateBatch(texts, targetLang = 'zh-CN') {
   if (!texts.length) return [];
   const clean = texts.map(t => (t || '').replace(/\n/g, ' ').trim());
   const body = `q=${encodeURIComponent(clean.map((t, i) => `${i + 1}. ${t}`).join('\n'))}`;
-  try {
-    const r = await fetchTimeout(
-      `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t`,
-      { method: 'POST', headers: { 'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/x-www-form-urlencoded' }, body },
-      8000, 1
-    );
-    const data = await r.json();
-    let out = '';
-    if (data?.[0]) for (const p of data[0]) { if (p[0]) out += p[0]; }
-    const map = {};
-    const RE = /(\d+)\.\s*([\s\S]*?)(?=\n\d+\.|$)/g;
-    let m;
-    while ((m = RE.exec(out)) !== null) {
-      const i = parseInt(m[1]) - 1, t = m[2].trim();
-      if (i >= 0 && i < texts.length && t) map[i] = t;
+  
+  // 轮询高可用 Google 翻译节点
+  const hosts = ['clients5.google.com', 'translate.googleapis.com', 'translate.google.com'];
+  
+  for (const host of hosts) {
+    try {
+      const r = await fetchTimeout(
+        `https://${host}/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t`,
+        { method: 'POST', headers: { 'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/x-www-form-urlencoded' }, body },
+        6000
+      );
+      
+      const data = await r.json();
+      let out = '';
+      if (data?.[0]) for (const p of data[0]) { if (p[0]) out += p[0]; }
+      
+      const map = {};
+      const RE = /(\d+)\.\s*([\s\S]*?)(?=\n\d+\.|$)/g;
+      let m;
+      while ((m = RE.exec(out)) !== null) {
+        const i = parseInt(m[1]) - 1, t = m[2].trim();
+        if (i >= 0 && i < texts.length && t) map[i] = t;
+      }
+      return clean.map((orig, i) => map[i] || orig);
+    } catch (e) {
+      console.warn(`[DEBUG] 节点 ${host} 翻译失败，尝试下一个...`);
     }
-    return clean.map((orig, i) => map[i] || orig);
-  } catch (e) { return clean; }
+  }
+  return clean; // 所有节点全军覆没
 }
 
 async function translateAll(segments, targetLang = 'zh-CN') {
   if (!segments || segments.length === 0) return { translations: [], successCount: 0 };
-  const BS = 20, CC = 2;
+  
+  // 将并发数 CC 强行降为 1，一排一排请求，绝不触发反爬虫并发拦截！
+  const BS = 20, CC = 1; 
   const batches = [];
   for (let i = 0; i < segments.length; i += BS) batches.push(segments.slice(i, i + BS));
   
+  const t0 = Date.now();
   const results = await asyncPool(CC, batches, async (b) => {
+    // 强制增加 300ms 的平滑请求间隔，骗过防火墙
+    await new Promise(r => setTimeout(r, 300));
     return await translateBatch(b.map(s => s.origText), targetLang);
   });
   
   const all = results.flat();
   const ok = all.filter((t, i) => t && t !== (segments[i]?.origText || '').replace(/\n/g, ' ').trim()).length;
+  console.log(`[DEBUG] 翻译完成 ${Date.now() - t0}ms，有效 ${ok}/${segments.length}`);
   return { translations: all, successCount: ok };
 }
 
@@ -302,7 +311,7 @@ async function cacheResponse(cacheKey, body, status, origHeaders, isGzip) {
   h.set('Cache-Control', 'public, max-age=86400');
   const resp = new Response(body, { status, headers: h });
   if (status >= 200 && status < 400) {
-    try { await caches.default.put(cacheKey, resp.clone()); } catch (e) {}
+    try { await caches.default.put(cacheKey, resp.clone()); console.log(`✅ 双语字幕成功写入缓存`); } catch (e) {}
   }
   return resp;
 }
@@ -355,7 +364,7 @@ export default {
     if (request.method === 'GET') {
       const purgeKey = new URL(request.url).searchParams.get('purge');
       if (purgeKey) { await caches.default.delete(purgeKey); return new Response('purged: ' + purgeKey); }
-      return new Response('Worker is Running V26 (Cross-Chapter Global Scan)');
+      return new Response('Worker is Running V27 (Anti-Ban Pro)');
     }
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
@@ -365,7 +374,7 @@ export default {
       
       const tokenStr = extractReqToken(reqBody);
       const reqId = tokenStr || fnv1aHash(reqBody);
-      const cacheKey = `https://yt-sub-cache/v26/global/${reqId}/${lang}`;
+      const cacheKey = `https://yt-sub-cache/v27/final/${reqId}/${lang}`;
       
       const earlyHit = await getCachedResponse(cacheKey);
       if (earlyHit) return earlyHit;
@@ -380,7 +389,7 @@ export default {
       const ytResp = await fetchTimeout(
         'https://youtubei.googleapis.com/youtubei/v1/get_panel',
         { method: 'POST', headers: fwd, body: reqBody },
-        15000, 0
+        15000
       );
 
       let bytes = new Uint8Array(await ytResp.arrayBuffer());
@@ -396,9 +405,12 @@ export default {
       const rebuilt = pbEncode(parsed);
       const final = isGzip ? await gzip(rebuilt) : rebuilt;
 
+      // 智能熔断防毒化缓存
       if (injectResult.changed && injectResult.rate >= 0.7) {
-        console.log(`[DEBUG] ✅ 允许写入缓存`);
+        console.log(`[DEBUG] ✅ 翻译成功率 ${(injectResult.rate * 100).toFixed(1)}%，允许写入缓存`);
         await cacheResponse(cacheKey, final, ytResp.status, ytResp.headers, isGzip);
+      } else if (injectResult.changed) {
+        console.log(`[DEBUG] ⚠️ 翻译成功率仅 ${(injectResult.rate * 100).toFixed(1)}%，触发缓存防毒熔断！`);
       }
 
       return makeResponse(final, ytResp.status, ytResp.headers, isGzip);
