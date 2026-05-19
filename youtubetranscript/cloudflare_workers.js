@@ -457,7 +457,7 @@ export default {
 
     try {
       const reqBody = new Uint8Array(await request.arrayBuffer());
-      const lang = 'zh-CN';
+      const lang = 'zh-CN,fa';
       
       const tokenStr = extractReqToken(reqBody);
       // 構建純文本 JSON 專屬快取 key
