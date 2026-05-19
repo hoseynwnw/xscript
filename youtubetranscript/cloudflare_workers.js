@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker: YouTube iOS 雙語字幕 (V49 - 環境變量 + 強制對齊版)
+ * Cloudflare Worker: YouTube iOS 雙語字幕 (V50 - 數據分離快取/完美同步版)
  */
 
 function varintSize(v) { v = v >>> 0; let s = 0; do { s++; v >>>= 7; } while (v > 0); return s; }
@@ -221,7 +221,7 @@ function injectTranslationsGlobally(obj, translations, state = { idx: 0 }) {
 }
 
 // ================================================================
-// 翻譯引擎 V49 (GAS 代理 + 強制對齊)
+// 翻譯引擎 V50 (GAS 代理 + 純文本數據分離快取)
 // ================================================================
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -246,15 +246,10 @@ async function translateBatch(texts, targetLang, batchIndex, gasUrl) {
   if (!texts.length) return [];
   const clean = texts.map(t => (t || '').replace(/\n/g, ' ').trim());
   
-  if (globalCircuitBroken) {
-    return clean;
-  }
+  if (globalCircuitBroken) return clean;
 
   try {
-    const payload = {
-      texts: clean,
-      targetLang: targetLang
-    };
+    const payload = { texts: clean, targetLang: targetLang };
 
     const r = await fetchTimeout(gasUrl, { 
       method: 'POST', 
@@ -273,10 +268,7 @@ async function translateBatch(texts, targetLang, batchIndex, gasUrl) {
     }
 
     const data = await r.json();
-    
-    if (data.error) {
-      throw new Error(data.error);
-    }
+    if (data.error) throw new Error(data.error);
 
     consecutiveErrors = 0;
     globalCircuitBroken = false;
@@ -287,7 +279,7 @@ async function translateBatch(texts, targetLang, batchIndex, gasUrl) {
       console.log(`[GAS] ✅ 批次 ${batchIndex} 翻譯成功`);
       return translatedArray;
     } else {
-      console.warn(`[GAS] 批次 ${batchIndex} 長度不符 (預期 ${clean.length}, 實際 ${translatedArray.length})，安全降級`);
+      console.warn(`[GAS] 批次 ${batchIndex} 長度不符，安全降級`);
       return clean;
     }
 
@@ -310,7 +302,7 @@ async function translateAll(segments, targetLang, gasUrl) {
   const batches = [];
   for (let i = 0; i < segments.length; i += BS) batches.push(segments.slice(i, i + BS));
   
-  console.log(`共 ${segments.length} 段，分 ${batches.length} 批 (GAS 代理, BS=${BS}, CC=${CC})`);
+  console.log(`共 ${segments.length} 段，分 ${batches.length} 批 (GAS 代理)`);
   const t0 = Date.now();
   const results = new Array(batches.length);
   let index = 0;
@@ -318,7 +310,7 @@ async function translateAll(segments, targetLang, gasUrl) {
   async function runner() {
     while (index < batches.length) {
       if (Date.now() - t0 > MAX_WORKER_TIME) {
-        console.error("⏳ 觸發全局超時守護！到達 28 秒紅線，中止剩餘。");
+        console.error("⏳ 觸發全局超時守護！中止剩餘。");
         while (index < batches.length) {
           results[index] = batches[index].map(s => s.origText.replace(/\n/g, ' ').trim());
           index++;
@@ -327,9 +319,7 @@ async function translateAll(segments, targetLang, gasUrl) {
       }
 
       const i = index++;
-      if (i > 0 && !globalCircuitBroken) {
-        await sleep(200); 
-      }
+      if (i > 0 && !globalCircuitBroken) await sleep(200); 
       results[i] = await translateBatch(batches[i].map(s => s.origText), targetLang, i, gasUrl);
     }
   }
@@ -339,22 +329,12 @@ async function translateAll(segments, targetLang, gasUrl) {
 
   const all = results.flat();
   const ok = all.filter((t, i) => t && t !== (segments[i]?.origText || '').replace(/\n/g, ' ').trim()).length;
-  console.log(`翻譯完成，總耗時 ${Date.now() - t0}ms，有效 ${ok}/${segments.length}`);
+  console.log(`翻譯耗時 ${Date.now() - t0}ms，有效 ${ok}/${segments.length}`);
   return { translations: all, successCount: ok };
 }
 
-async function processAndInjectSubtitles(obj, targetLang, gasUrl) {
-  if (!obj || typeof obj !== 'object') return { changed: false, rate: 0 };
-  const segments = collectSegmentsGlobally(obj);
-  console.log(`字幕段落: ${segments.length}`);
-  if (!segments.length) return { changed: false, rate: 0 };
-  const { translations, successCount } = await translateAll(segments, targetLang, gasUrl);
-  const changed = injectTranslationsGlobally(obj, translations, { idx: 0 });
-  return { changed, rate: successCount / segments.length };
-}
-
 // ================================================================
-// 網路層與快取工具 
+// 網路層與分離式快取工具 
 // ================================================================
 
 function fnv1aHash(buffer) {
@@ -386,28 +366,37 @@ function extractReqToken(reqBody) {
   return null;
 }
 
-async function getCachedResponse(cacheKey) {
-  const cached = await caches.default.match(cacheKey);
-  if (cached) console.log(`✅ 快取命中: ${cacheKey}`);
-  else console.log(`❌ 快取未命中: ${cacheKey}`);
-  return cached || null;
+// 僅快取純文本 JSON 數組，不再快取 Protobuf Response
+async function getTextCache(cacheKey) {
+  try {
+    const cachedResp = await caches.default.match(cacheKey);
+    if (cachedResp) {
+      const data = await cachedResp.json();
+      console.log(`✅ 文本快取命中: ${cacheKey}`);
+      return data.translations;
+    }
+  } catch (e) {
+    console.warn('讀取文本快取失敗:', e.message);
+  }
+  console.log(`❌ 文本快取未命中: ${cacheKey}`);
+  return null;
 }
 
-async function cacheResponse(cacheKey, body, status, origHeaders, isGzip) {
-  const h = new Headers();
-  for (const k of ['content-type', 'vary', 'alt-svc', 'x-content-type-options']) {
-    const v = origHeaders.get(k); if (v) h.set(k, v);
+async function putTextCache(cacheKey, translations) {
+  try {
+    const body = JSON.stringify({ translations });
+    const resp = new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=86400'
+      }
+    });
+    await caches.default.put(cacheKey, resp);
+    console.log('✅ 純文本翻譯已快取 24h');
+  } catch (e) {
+    console.warn('寫入文本快取失敗:', e.message);
   }
-  if (isGzip) h.set('Content-Encoding', 'gzip');
-  h.set('Content-Type', 'application/x-protobuf');
-  h.set('Content-Length', String(body.length));
-  h.set('Cache-Control', 'public, max-age=86400');
-  const resp = new Response(body, { status, headers: h });
-  if (status >= 200 && status < 400) {
-    try { await caches.default.put(cacheKey, resp.clone()); console.log('✅ 雙語字幕已快取 24h'); }
-    catch (e) { console.warn('快取寫入失敗:', e.message); }
-  }
-  return resp;
 }
 
 function makeResponse(body, status, origHeaders, isGzip) {
@@ -450,7 +439,7 @@ export default {
     if (request.method === 'GET') {
       const purgeKey = new URL(request.url).searchParams.get('purge');
       if (purgeKey) { await caches.default.delete(purgeKey); return new Response('purged: ' + purgeKey); }
-      return new Response('Worker V49 (Env Variables + Strict Alignment)');
+      return new Response('Worker V50 (Text-only Cache for Perfect Sync)');
     }
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
@@ -459,11 +448,9 @@ export default {
       const lang = 'zh-CN';
       
       const tokenStr = extractReqToken(reqBody);
-      const cacheKey = `https://yt-sub-cache/v49/${tokenStr || fnv1aHash(reqBody)}/${lang}`;
+      // 構建純文本 JSON 專屬快取 key
+      const textCacheKey = `https://yt-sub-text-cache/v50/${tokenStr || fnv1aHash(reqBody)}/${lang}`;
       
-      const earlyHit = await getCachedResponse(cacheKey);
-      if (earlyHit) return earlyHit;
-
       const fwd = new Headers();
       const skip = new Set(['host','accept-encoding','content-length','connection','keep-alive',
         'proxy-authenticate','proxy-authorization','te','trailers','transfer-encoding','upgrade',
@@ -471,9 +458,9 @@ export default {
       for (const [k, v] of request.headers) { if (!skip.has(k.toLowerCase())) fwd.set(k, v); }
       fwd.set('Accept-Encoding', 'gzip, identity');
 
-      // 優先讀取環境變量，若無則使用舊的預設值，避免出錯
       const gasUrl = env.GAS_URL || 'https://script.google.com/macros/s/AKfycbxUfXTjUQX6q1FiVjv5ZsNblPcOCbU_cJVO7BWXhctl1RX6Y5FA8xGvwPLnyVs5A_Q/exec';
 
+      // 1. 每次都強制向 YouTube 拉取最新鮮的 Protobuf，保證時間狀態錨點正確
       const ytResp = await fetchTimeout(
         'https://youtubei.googleapis.com/youtubei/v1/get_panel',
         { method: 'POST', headers: fwd, body: reqBody },
@@ -488,21 +475,41 @@ export default {
       try { parsed = pbDecode(bytes); }
       catch (e) { return makeResponse(isGzip ? await gzip(bytes) : bytes, ytResp.status, ytResp.headers, isGzip); }
 
-      const injectResult = await processAndInjectSubtitles(parsed, lang, gasUrl);
-
-      if (!injectResult.changed) {
+      const segments = collectSegmentsGlobally(parsed);
+      console.log(`取得新鮮 Protobuf，字幕段落: ${segments.length}`);
+      
+      if (!segments.length) {
         return makeResponse(isGzip ? await gzip(bytes) : bytes, ytResp.status, ytResp.headers, isGzip);
       }
 
+      // 2. 檢查純文本快取
+      let finalTranslations = await getTextCache(textCacheKey);
+      
+      if (!finalTranslations || finalTranslations.length !== segments.length) {
+        // 3. 快取未命中或長度對不上，重新呼叫 GAS 翻譯
+        const { translations, successCount } = await translateAll(segments, lang, gasUrl);
+        finalTranslations = translations;
+        
+        // 4. 翻譯成功率及格則寫入 JSON 快取
+        if (successCount / segments.length >= 0.6) {
+          await putTextCache(textCacheKey, finalTranslations);
+        } else {
+          console.log(`⚠️ 成功率過低，不寫入文本快取`);
+        }
+      }
+
+      // 5. 將翻譯結果注入新鮮的 Protobuf
+      const changed = injectTranslationsGlobally(parsed, finalTranslations, { idx: 0 });
+
+      if (!changed) {
+        return makeResponse(isGzip ? await gzip(bytes) : bytes, ytResp.status, ytResp.headers, isGzip);
+      }
+
+      // 6. 重新打包返回（只返回響應，不再快取整包 Response）
       const rebuilt = pbEncode(parsed);
       const final = isGzip ? await gzip(rebuilt) : rebuilt;
 
-      if (injectResult.rate < 0.6) {
-        console.log(`⚠️ 成功率 ${(injectResult.rate * 100).toFixed(1)}%，不快取`);
-        return makeResponse(final, ytResp.status, ytResp.headers, isGzip);
-      }
-
-      return await cacheResponse(cacheKey, final, ytResp.status, ytResp.headers, isGzip);
+      return makeResponse(final, ytResp.status, ytResp.headers, isGzip);
 
     } catch (e) {
       console.error(`致命錯誤: ${e.message}`);
