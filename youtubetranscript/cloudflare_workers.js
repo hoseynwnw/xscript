@@ -295,8 +295,8 @@ async function translateAll(segments, targetLang, gasUrl) {
   globalCircuitBroken = false;
   consecutiveErrors = 0;
 
-  const BS = 80; 
-  const CC = 3;  
+  const BS = 50; 
+  const CC = 5;  
   const MAX_WORKER_TIME = 28000; 
 
   const batches = [];
