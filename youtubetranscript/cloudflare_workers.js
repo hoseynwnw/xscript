@@ -190,7 +190,7 @@ function collectSegmentsGlobally(obj, segments = []) {
   return segments;
 }
 
-function injectTranslationsGlobally(obj, translations, state = { idx: 0 }) {
+function injectTranslationsGlobally(obj, translations, state = { idx: 0 }, targetLang = 'zh-CN') {
   if (!obj || typeof obj !== 'object') return false;
   let changed = false;
   const extracted = extractTimeAndText(obj);
@@ -202,7 +202,19 @@ function injectTranslationsGlobally(obj, translations, state = { idx: 0 }) {
       zh = `【受限】${cleanOrig.slice(0, 10)}...`;
     }
 
-    const appendStr = `\n\u3000${zh}`;
+    // 判斷是否為 RTL (由右至左) 語言
+    const rtlLangs = ['ar', 'he', 'fa', 'ur']; // 阿拉伯語、希伯來語、波斯語、烏爾都語
+    const isRtl = rtlLangs.some(l => targetLang.startsWith(l));
+
+    let appendStr;
+    if (isRtl) {
+      // 使用 \u202B (RLE) 強制右對齊，並用 \u202C (PDF) 閉合
+      appendStr = `\n\u202B${zh}\u202C`;
+    } else {
+      // 其他 LTR 語言保留原有的全角空格縮排
+      appendStr = `\n\u3000${zh}`;
+    }
+
     hackTextAndLength(obj, appendStr, extracted.type);
     obj.__dirty = true;
     state.idx++;
@@ -211,7 +223,7 @@ function injectTranslationsGlobally(obj, translations, state = { idx: 0 }) {
   for (const val of Object.values(obj)) {
     for (const item of (Array.isArray(val) ? val : [val])) {
       if (item && item.t === 'msg') {
-        if (injectTranslationsGlobally(item.v, translations, state)) {
+        if (injectTranslationsGlobally(item.v, translations, state, targetLang)) {
           item.dirty = true; obj.__dirty = true; changed = true;
         }
       }
@@ -499,7 +511,7 @@ export default {
       }
 
       // 5. 將翻譯結果注入新鮮的 Protobuf
-      const changed = injectTranslationsGlobally(parsed, finalTranslations, { idx: 0 });
+      const changed = injectTranslationsGlobally(parsed, finalTranslations, { idx: 0 }, lang);
 
       if (!changed) {
         return makeResponse(isGzip ? await gzip(bytes) : bytes, ytResp.status, ytResp.headers, isGzip);
