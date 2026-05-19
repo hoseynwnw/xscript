@@ -3,7 +3,6 @@ function doPost(e) {
   try {
     var params = JSON.parse(e.postData.contents);
     var texts = params.texts || [];
-    // 支援以逗號分隔的多個語言，例如 'zh-CN,fa'
     var targetLangParam = params.targetLang || 'zh-CN'; 
     var sourceLang = params.sourceLang || '';
 
@@ -12,7 +11,6 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    // 1. 防吞噬處理：佔位符
     for (var i = 0; i < texts.length; i++) {
       if (!texts[i] || texts[i].trim() === "") texts[i] = " ";
     }
@@ -20,11 +18,9 @@ function doPost(e) {
     var delimiter = "\n\n ||| \n\n";
     var combinedText = texts.join(delimiter);
     
-    // 將目標語言拆分為陣列
     var targetLangs = targetLangParam.split(',').map(function(l) { return l.trim(); });
-    var multiLangResults = []; // 儲存各個語言的翻譯陣列
+    var multiLangResults = []; 
 
-    // 2. 針對每個語言循環呼叫 Google 內網翻譯
     for (var langIdx = 0; langIdx < targetLangs.length; langIdx++) {
       var tLang = targetLangs[langIdx];
       var translatedText = "";
@@ -42,19 +38,30 @@ function doPost(e) {
 
       var translatedArray = translatedText.split(/\s*\|\|\|\s*|\s*丨丨丨\s*/);
 
-      // 急救機制
+      // --- 核心修復：為急救機制加入重試與防併發休眠 ---
       if (translatedArray.length !== texts.length) {
         translatedArray = [];
         for (var j = 0; j < texts.length; j++) {
           if (texts[j] === " ") {
             translatedArray.push("");
           } else {
-            translatedArray.push(LanguageApp.translate(texts[j], sourceLang, tLang));
+            var singleTrans = "";
+            for (var sr = 0; sr < 3; sr++) {
+              try {
+                singleTrans = LanguageApp.translate(texts[j], sourceLang, tLang);
+                break;
+              } catch (singleErr) {
+                if (sr === 2) throw singleErr;
+                Utilities.sleep(1000); // 逐句翻譯被限流時休眠 1 秒
+              }
+            }
+            translatedArray.push(singleTrans);
           }
+          // 每句間隔 50 毫秒，防止雙語 100 句瞬間併發打穿 Google 防火牆
+          Utilities.sleep(50); 
         }
       }
 
-      // 智慧排版：判斷當前這層語言是否為 RTL (由右至左)
       var rtlLangs = ['ar', 'he', 'fa', 'ur'];
       var isRtl = false;
       for (var rl = 0; rl < rtlLangs.length; rl++) {
@@ -63,7 +70,6 @@ function doPost(e) {
 
       for (var k = 0; k < translatedArray.length; k++) {
         var cleanStr = (translatedArray[k] || "").trim();
-        // 如果是 RTL 語言，單獨為這行字套上 \u202B 控制符
         if (isRtl && cleanStr !== "") {
           cleanStr = "\u202B" + cleanStr + "\u202C";
         }
@@ -73,7 +79,6 @@ function doPost(e) {
       multiLangResults.push(translatedArray);
     }
 
-    // 3. 將多個語言的陣列垂直合併
     var finalTranslations = [];
     for (var i = 0; i < texts.length; i++) {
       var combinedLine = [];
@@ -82,7 +87,6 @@ function doPost(e) {
           combinedLine.push(multiLangResults[l][i]);
         }
       }
-      // 用換行符將中文、波斯文等拼在一起
       finalTranslations.push(combinedLine.join("\n"));
     }
 
