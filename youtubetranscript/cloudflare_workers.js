@@ -238,7 +238,7 @@ function injectTranslationsGlobally(obj, translations, state = { idx: 0 }, targe
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function fetchTimeout(url, opts = {}, ms = 15000) { 
+async function fetchTimeout(url, opts = {}, ms = 22000) { 
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -267,7 +267,7 @@ async function translateBatch(texts, targetLang, batchIndex, gasUrl) {
       method: 'POST', 
       headers: { 'Content-Type': 'application/json' }, 
       body: JSON.stringify(payload)
-    }, 15000); 
+    }, 22000); 
 
     if (!r.ok) {
       console.warn(`[GAS] 批次 ${batchIndex} 攔截 HTTP ${r.status}`);
