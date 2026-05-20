@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker: YouTube iOS 雙語字幕 (V51 - 多引擎災備/多語合併/完美同步版)
+ * Cloudflare Worker: YouTube iOS 雙語字幕 (V52 - 分批次獨立快取 & 配額監控版)
  */
 
 function varintSize(v) { v = v >>> 0; let s = 0; do { s++; v >>>= 7; } while (v > 0); return s; }
@@ -202,17 +202,12 @@ function injectTranslationsGlobally(obj, translations, state = { idx: 0 }, targe
       zh = `【受限】${cleanOrig.slice(0, 10)}...`;
     }
 
-    // RTL 語言智慧排版
     const rtlLangs = ['ar', 'he', 'fa', 'ur']; 
     const isRtl = rtlLangs.some(l => targetLang.startsWith(l));
 
     let appendStr;
-    if (isRtl) {
-      // 若包含 RTL，交由 GAS 端下發的 \u202B 處理，此處僅簡單換行
-      appendStr = `\n${zh}`;
-    } else {
-      appendStr = `\n\u3000${zh}`;
-    }
+    if (isRtl) appendStr = `\n${zh}`;
+    else appendStr = `\n\u3000${zh}`;
 
     hackTextAndLength(obj, appendStr, extracted.type);
     obj.__dirty = true;
@@ -231,13 +226,8 @@ function injectTranslationsGlobally(obj, translations, state = { idx: 0 }, targe
   return changed;
 }
 
-// ================================================================
-// 翻譯引擎 V51 (雙引擎災備 + 純文本數據分離快取)
-// ================================================================
-
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 超時放寬到 22 秒，適應多語種合併與極端重試
 async function fetchTimeout(url, opts = {}, ms = 22000) { 
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
@@ -252,33 +242,22 @@ async function fetchTimeout(url, opts = {}, ms = 22000) {
 }
 
 let globalCircuitBroken = false;
-let consecutiveErrors = 0;
-// 全局紀錄當前使用的 GAS 線路索引
 let currentGasIndex = 0;
 
+// 【重构】API调用分离，新增 isSuccess 状态标志
 async function translateBatch(texts, targetLang, batchIndex, gasUrls) {
-  if (!texts.length) return [];
   const clean = texts.map(t => (t || '').replace(/\n/g, ' ').trim());
-  
-  if (globalCircuitBroken) return clean;
+  if (globalCircuitBroken) return { translated: clean, isSuccess: false };
 
   let attempts = 0;
   while (attempts < gasUrls.length) {
-    // 確保索引不會因為併發越界
-    if (currentGasIndex >= gasUrls.length) {
-      currentGasIndex = gasUrls.length - 1;
-    }
-    
-    // 鎖定當前嘗試的線路，避免被其他併發批次干擾
+    if (currentGasIndex >= gasUrls.length) currentGasIndex = gasUrls.length - 1;
     let myTryIndex = currentGasIndex; 
     let gasUrl = gasUrls[myTryIndex];
-    
-    // 防呆機制：如果 url 為空，降級返回
-    if (!gasUrl) return clean;
+    if (!gasUrl) return { translated: clean, isSuccess: false };
     
     try {
       const payload = { texts: clean, targetLang: targetLang };
-
       const r = await fetchTimeout(gasUrl, { 
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' }, 
@@ -290,54 +269,80 @@ async function translateBatch(texts, targetLang, batchIndex, gasUrls) {
       const data = await r.json();
       if (data.error) throw new Error(data.error);
 
-      consecutiveErrors = 0;
+      // --- 打印配额监控 ---
+      if (data.quota) {
+        console.log(`[GAS] 批次 ${batchIndex} 成功 (線路 ${myTryIndex}) | 當前配額: ${data.quota} / 5000`);
+      }
+
       globalCircuitBroken = false;
-      
       const translatedArray = data.translations || [];
       
       if (translatedArray.length === clean.length) {
-        console.log(`[GAS] ✅ 批次 ${batchIndex} 翻譯成功 (線路 ${myTryIndex})`);
-        return translatedArray;
+        return { translated: translatedArray, isSuccess: true };
       } else {
         console.warn(`[GAS] 批次 ${batchIndex} 長度不符，安全降級`);
-        return clean;
+        return { translated: clean, isSuccess: false };
       }
 
     } catch (e) {
-      console.warn(`[GAS] 批次 ${batchIndex} 線路 ${myTryIndex} 失敗: ${e.message}`);
-      
-      if (e.message.includes('1 日にサービス') || e.message.includes('Too many') || consecutiveErrors >= 2) {
-        // 併發安全修改：只有當全局索引還等於我剛才嘗試的索引時，才進行切換
+      if (e.message.includes('1 日にサービス') || e.message.includes('Too many')) {
         if (currentGasIndex === myTryIndex) {
           currentGasIndex++;
-          consecutiveErrors = 0;
-          
           if (currentGasIndex >= gasUrls.length) {
             console.error("🚨 觸發全局熔斷！所有線路均已耗盡。");
             globalCircuitBroken = true;
-            return clean;
+            return { translated: clean, isSuccess: false };
           } else {
             console.log(`🔄 自動切換至備用 GAS 線路: ${currentGasIndex}`);
           }
         }
-        // 被其他併發批次切換過的話，直接進入下一次迴圈嘗試新線路
       } else {
-        consecutiveErrors++;
-        return clean; 
+        return { translated: clean, isSuccess: false }; 
       }
     }
     attempts++;
   }
-  return clean;
+  return { translated: clean, isSuccess: false };
 }
 
-async function translateAll(segments, targetLang, gasUrls) {
-  if (!segments || !segments.length) return { translations: [], successCount: 0 };
+// ================================================================
+// 分批次快取工具 (Granular Caching)
+// ================================================================
+
+function fnv1aHash(buffer) {
+  let h = 2166136261;
+  for (let i = 0; i < buffer.length; i++) { h ^= buffer[i]; h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24); h = h >>> 0; }
+  return h.toString(16);
+}
+
+async function getBatchCache(cacheKey) {
+  try {
+    const cachedResp = await caches.default.match(cacheKey);
+    if (cachedResp) {
+      const data = await cachedResp.json();
+      return data.translations;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// 加入 ctx.waitUntil 確保後台寫入不會因為客戶端斷開而中止
+function putBatchCache(cacheKey, translations, ctx) {
+  try {
+    const resp = new Response(JSON.stringify({ translations }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=86400' }
+    });
+    if (ctx) ctx.waitUntil(caches.default.put(cacheKey, resp));
+    else caches.default.put(cacheKey, resp).catch(()=>{});
+  } catch (e) {}
+}
+
+// 【重构】核心翻譯邏輯，支援分批次獨立快取
+async function translateAll(segments, targetLang, gasUrls, ctx) {
+  if (!segments || !segments.length) return { translations: [] };
   
   globalCircuitBroken = false;
-  consecutiveErrors = 0;
-
-  // BS=50, CC=4：完美避開 CF 50次子請求限制，兼顧高併發
   const BS = 50; 
   const CC = 4;  
   const MAX_WORKER_TIME = 28000; 
@@ -345,10 +350,11 @@ async function translateAll(segments, targetLang, gasUrls) {
   const batches = [];
   for (let i = 0; i < segments.length; i += BS) batches.push(segments.slice(i, i + BS));
   
-  console.log(`共 ${segments.length} 段，分 ${batches.length} 批 (雙引擎災備, BS=${BS}, CC=${CC})`);
+  console.log(`共 ${segments.length} 段，分 ${batches.length} 批 (分批次快取版, BS=${BS}, CC=${CC})`);
   const t0 = Date.now();
   const results = new Array(batches.length);
   let index = 0;
+  let cacheHitCount = 0;
 
   async function runner() {
     while (index < batches.length) {
@@ -362,83 +368,40 @@ async function translateAll(segments, targetLang, gasUrls) {
       }
 
       const i = index++;
+      
+      // 生成這個批次專屬的快取 Key
+      const batchTexts = batches[i].map(s => s.origText.replace(/\n/g, ' ').trim());
+      const batchStr = batchTexts.join('||');
+      const batchHash = fnv1aHash(ENC.encode(batchStr));
+      const batchCacheKey = `https://yt-sub-text-cache/v52/batch/${targetLang}/${batchHash}`;
+
+      // 1. 檢查獨立快取
+      const cached = await getBatchCache(batchCacheKey);
+      if (cached) {
+        results[i] = cached;
+        cacheHitCount++;
+        continue; // 命中快取，跳過 API 調用
+      }
+
+      // 2. 未命中，調用 GAS
       if (i > 0 && !globalCircuitBroken) await sleep(200); 
-      results[i] = await translateBatch(batches[i].map(s => s.origText), targetLang, i, gasUrls);
+      const { translated, isSuccess } = await translateBatch(batchTexts, targetLang, i, gasUrls);
+      results[i] = translated;
+
+      // 3. 如果成功，立刻將該批次寫入快取 (無阻塞後台寫入)
+      if (isSuccess) {
+        putBatchCache(batchCacheKey, translated, ctx);
+      }
     }
   }
 
   const workers = Array(Math.min(CC, batches.length)).fill(0).map(() => runner());
   await Promise.all(workers);
 
+  if (cacheHitCount > 0) console.log(`🎯 批次快取命中數: ${cacheHitCount} / ${batches.length}`);
+
   const all = results.flat();
-  const ok = all.filter((t, i) => t && t !== (segments[i]?.origText || '').replace(/\n/g, ' ').trim()).length;
-  console.log(`翻譯耗時 ${Date.now() - t0}ms，有效 ${ok}/${segments.length}`);
-  return { translations: all, successCount: ok };
-}
-
-// ================================================================
-// 網路層與文本快取工具 
-// ================================================================
-
-function fnv1aHash(buffer) {
-  let h = 2166136261;
-  for (let i = 0; i < buffer.length; i++) { h ^= buffer[i]; h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24); h = h >>> 0; }
-  return h.toString(16);
-}
-
-function extractReqToken(reqBody) {
-  const marker = new Uint8Array([80, 65, 109, 111, 100, 101, 114, 110, 95, 116, 114, 97, 110, 115, 99, 114, 105, 112, 116, 95, 118, 105, 101, 119]); 
-  for (let i = 0; i <= reqBody.length - marker.length; i++) {
-    let match = true;
-    for (let j = 0; j < marker.length; j++) {
-      if (reqBody[i + j] !== marker[j]) { match = false; break; }
-    }
-    if (match) {
-      const tagIdx = i + marker.length;
-      if (reqBody[tagIdx] === 0x1a) {
-        const len = reqBody[tagIdx + 1];
-        if (len > 0 && len < 128 && tagIdx + 2 + len <= reqBody.length) {
-          const idBytes = reqBody.slice(tagIdx + 2, tagIdx + 2 + len);
-          let idStr = '';
-          for (let b of idBytes) idStr += String.fromCharCode(b);
-          return idStr;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-async function getTextCache(cacheKey) {
-  try {
-    const cachedResp = await caches.default.match(cacheKey);
-    if (cachedResp) {
-      const data = await cachedResp.json();
-      console.log(`✅ 文本快取命中: ${cacheKey}`);
-      return data.translations;
-    }
-  } catch (e) {
-    console.warn('讀取文本快取失敗:', e.message);
-  }
-  console.log(`❌ 文本快取未命中: ${cacheKey}`);
-  return null;
-}
-
-async function putTextCache(cacheKey, translations) {
-  try {
-    const body = JSON.stringify({ translations });
-    const resp = new Response(body, {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=86400'
-      }
-    });
-    await caches.default.put(cacheKey, resp);
-    console.log('✅ 純文本翻譯已快取 24h');
-  } catch (e) {
-    console.warn('寫入文本快取失敗:', e.message);
-  }
+  return { translations: all };
 }
 
 function makeResponse(body, status, origHeaders, isGzip) {
@@ -477,22 +440,16 @@ async function gzip(data) {
 }
 
 export default {
-  async fetch(request, env) {
+  // 注意：這裡新增了 ctx 參數
+  async fetch(request, env, ctx) {
     if (request.method === 'GET') {
-      const purgeKey = new URL(request.url).searchParams.get('purge');
-      if (purgeKey) { await caches.default.delete(purgeKey); return new Response('purged: ' + purgeKey); }
-      return new Response('Worker V51 (Ultimate Multi-GAS Failover & Multi-Lang)');
+      return new Response('Worker V52 (Granular Caching & Quota Monitor)');
     }
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
     try {
       const reqBody = new Uint8Array(await request.arrayBuffer());
-      
-      // 修改這裡支援多語種！例如: 'zh-CN' 或 'zh-CN,fa'
       const lang = 'zh-CN,fa'; 
-      
-      const tokenStr = extractReqToken(reqBody);
-      const textCacheKey = `https://yt-sub-text-cache/v51/${tokenStr || fnv1aHash(reqBody)}/${lang}`;
       
       const fwd = new Headers();
       const skip = new Set(['host','accept-encoding','content-length','connection','keep-alive',
@@ -501,7 +458,6 @@ export default {
       for (const [k, v] of request.headers) { if (!skip.has(k.toLowerCase())) fwd.set(k, v); }
       fwd.set('Accept-Encoding', 'gzip, identity');
 
-      // 動態讀取多個 GAS 環境變量，組成備用池
       const gasUrls = [
         env.GAS_URL1,
         env.GAS_URL,
@@ -511,7 +467,6 @@ export default {
         gasUrls.push('https://script.google.com/macros/s/AKfycbxUfXTjUQX6q1FiVjv5ZsNblPcOCbU_cJVO7BWXhctl1RX6Y5FA8xGvwPLnyVs5A_Q/exec');
       }
 
-      // 每次強制獲取新鮮的 Protobuf 以保持時間進度條完美同步
       const ytResp = await fetchTimeout(
         'https://youtubei.googleapis.com/youtubei/v1/get_panel',
         { method: 'POST', headers: fwd, body: reqBody },
@@ -527,29 +482,15 @@ export default {
       catch (e) { return makeResponse(isGzip ? await gzip(bytes) : bytes, ytResp.status, ytResp.headers, isGzip); }
 
       const segments = collectSegmentsGlobally(parsed);
-      console.log(`取得新鮮 Protobuf，字幕段落: ${segments.length}`);
       
       if (!segments.length) {
         return makeResponse(isGzip ? await gzip(bytes) : bytes, ytResp.status, ytResp.headers, isGzip);
       }
 
-      // 檢查分離式文本快取
-      let finalTranslations = await getTextCache(textCacheKey);
-      
-      if (!finalTranslations || finalTranslations.length !== segments.length) {
-        // 呼叫翻譯引擎 (帶入備用連接池)
-        const { translations, successCount } = await translateAll(segments, lang, gasUrls);
-        finalTranslations = translations;
-        
-        if (successCount / segments.length >= 0.6) {
-          await putTextCache(textCacheKey, finalTranslations);
-        } else {
-          console.log(`⚠️ 成功率過低，不寫入文本快取`);
-        }
-      }
+      // 傳入 ctx 讓底層可以使用 waitUntil 進行無阻塞寫入
+      const { translations } = await translateAll(segments, lang, gasUrls, ctx);
 
-      // 將翻譯結果注入新鮮的 Protobuf
-      const changed = injectTranslationsGlobally(parsed, finalTranslations, { idx: 0 }, lang);
+      const changed = injectTranslationsGlobally(parsed, translations, { idx: 0 }, lang);
 
       if (!changed) {
         return makeResponse(isGzip ? await gzip(bytes) : bytes, ytResp.status, ytResp.headers, isGzip);
